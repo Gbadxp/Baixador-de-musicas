@@ -286,7 +286,7 @@ echo.
 echo [>>] Baixando e aplicando metadados...
 echo [>>] Usando YouTube normal primeiro e YouTube Music como reserva.
 echo [>>] Aguarde. Playlists grandes podem demorar bastante.
-echo [INFO] O detalhe tecnico fica em "download_log.txt" dentro da pasta criada.
+echo [INFO] O progresso e as porcentagens aparecem abaixo.
 echo.
 
 call :RUN_SPOTDL "%url%"
@@ -310,7 +310,7 @@ if errorlevel 1 (
         popd
         echo.
         echo [ERRO] Ocorreu um problema ao baixar mesmo apos o reparo.
-        echo Veja o arquivo "download_log.txt" dentro da pasta criada.
+        echo Veja as mensagens de erro exibidas acima.
         echo.
         echo Se o erro citar login, bot ou PO token, o YouTube bloqueou a sessao.
         echo Nesse caso sera preciso tentar mais tarde ou usar cookies do navegador.
@@ -402,8 +402,10 @@ exit /b %errorlevel%
 echo ==========================================================>> "download_log.txt"
 echo Nova tentativa: %date% %time%>> "download_log.txt"
 echo Comando: spotdl download "%~1" --audio youtube youtube-music>> "download_log.txt"
-%PYCMD% -m spotdl download "%~1" --audio youtube youtube-music --format mp3 --threads 4 --max-retries 5 >> "download_log.txt" 2>&1
-exit /b %errorlevel%
+%PYCMD% -m spotdl download "%~1" --audio youtube youtube-music --format mp3 --threads 4 --max-retries 5
+set "download_result=%errorlevel%"
+echo Resultado: %download_result%>> "download_log.txt"
+exit /b %download_result%
 
 :REPAIR_YOUTUBE_TOOLS
 %PYCMD% -m pip install -U spotdl yt-dlp ytmusicapi brotli websockets mutagen
