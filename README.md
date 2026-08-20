@@ -14,8 +14,10 @@ O fluxo principal e:
 ## Funcionalidades
 
 - Verifica e instala Python, FFmpeg, spotDL, Mutagen e Deno quando necessario.
+- Atualiza `spotDL`, `yt-dlp`, `ytmusicapi`, `brotli` e `websockets` para reduzir falhas do YouTube.
 - Detecta links do Spotify e do YouTube.
 - Cria pastas sequenciais por sessao: `Musicas_Spotify`, `Musicas_Spotify_2`, `Musicas_YouTube`, etc.
+- Usa YouTube normal primeiro e YouTube Music como reserva.
 - Valida se os MP3 baixados possuem capa embutida.
 - Pesquisa metadados incompletos no iTunes Search e no MusicBrainz.
 - Remove musicas sem capa e faz uma segunda tentativa automatica.
@@ -57,6 +59,19 @@ O script tenta instalar automaticamente via `winget` quando necessario:
 | spotDL | Resolver links, baixar musicas e aplicar metadados |
 | Mutagen | Validar e ajustar tags ID3 |
 | Deno | Auxiliar downloads do YouTube em alguns casos |
+| yt-dlp, ytmusicapi, brotli, websockets | Baixar audio do YouTube e evitar erros comuns de extracao |
+
+## Erro "Could not get client token"
+
+Esse erro vem do lado do YouTube/YouTube Music, nao do Spotify. O script agora tenta evitar isso de tres formas:
+
+1. Atualiza automaticamente `spotDL`, `yt-dlp`, `ytmusicapi`, `brotli` e `websockets`.
+2. Usa `--audio youtube youtube-music`, ou seja, tenta YouTube normal antes de YouTube Music.
+3. Se o download falhar, roda um reparo automatico e tenta baixar de novo.
+
+O detalhe tecnico de cada tentativa fica no arquivo `download_log.txt` dentro da pasta criada.
+
+Se ainda aparecer erro de login, bot, cookie ou PO token, significa que o YouTube bloqueou aquela sessao. Nesse caso, normalmente resolve tentando mais tarde; em casos persistentes, pode ser necessario usar cookies do navegador com o `spotDL`.
 
 ## Busca online de metadados
 

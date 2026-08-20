@@ -149,6 +149,18 @@ if %errorlevel% neq 0 (
     echo [OK] spotDL pronto.
 )
 
+echo [>>] Atualizando ferramentas de download do YouTube...
+echo [>>] Isso corrige erros comuns do yt-dlp, como "Could not get client token".
+%PYCMD% -m pip install -U spotdl yt-dlp ytmusicapi brotli websockets mutagen
+if errorlevel 1 (
+    echo.
+    echo [ERRO] Falha ao atualizar spotDL/yt-dlp.
+    echo Tente executar este script novamente como administrador.
+    pause
+    exit /b
+)
+echo [OK] Ferramentas de download atualizadas.
+
 echo [>>] Verificando biblioteca de metadados...
 %PYCMD% -c "import mutagen" >nul 2>&1
 if %errorlevel% neq 0 (
@@ -272,18 +284,40 @@ if %errorlevel% neq 0 (
 
 echo.
 echo [>>] Baixando e aplicando metadados...
+echo [>>] Usando YouTube normal primeiro e YouTube Music como reserva.
 echo [>>] Aguarde. Playlists grandes podem demorar bastante.
+echo [INFO] O detalhe tecnico fica em "download_log.txt" dentro da pasta criada.
 echo.
 
-%PYCMD% -m spotdl "%url%"
-if %errorlevel% neq 0 (
-    popd
+call :RUN_SPOTDL "%url%"
+if errorlevel 1 (
     echo.
-    echo [ERRO] Ocorreu um problema ao baixar.
-    echo Verifique o link, sua internet ou tente novamente mais tarde.
+    echo [AVISO] O download falhou. Vou reparar yt-dlp/YouTube e tentar novamente.
+    echo [DICA] Esse reparo costuma resolver "Could not get client token".
     echo.
-    pause
-    goto INICIO
+    call :REPAIR_YOUTUBE_TOOLS
+    if errorlevel 1 (
+        popd
+        echo.
+        echo [ERRO] Nao foi possivel reparar as ferramentas de download.
+        pause
+        goto INICIO
+    )
+    echo.
+    echo [>>] Tentando baixar novamente...
+    call :RUN_SPOTDL "%url%"
+    if errorlevel 1 (
+        popd
+        echo.
+        echo [ERRO] Ocorreu um problema ao baixar mesmo apos o reparo.
+        echo Veja o arquivo "download_log.txt" dentro da pasta criada.
+        echo.
+        echo Se o erro citar login, bot ou PO token, o YouTube bloqueou a sessao.
+        echo Nesse caso sera preciso tentar mais tarde ou usar cookies do navegador.
+        echo.
+        pause
+        goto INICIO
+    )
 )
 
 echo.
@@ -296,7 +330,7 @@ if "%meta_result%"=="1" (
     echo [AVISO] Alguma musica veio sem capa embutida.
     echo [>>] Fazendo uma segunda tentativa automatica...
     echo.
-    %PYCMD% -m spotdl "%url%"
+    call :RUN_SPOTDL "%url%"
     echo.
     echo [>>] Validando novamente...
     %PYCMD% "%SCRIPT_DIR%metadata_fallback.py"
@@ -362,4 +396,17 @@ if exist "%folder%" (
     goto CREATE_FOLDER_LOOP
 )
 mkdir "%folder%" >nul 2>&1
+exit /b %errorlevel%
+
+:RUN_SPOTDL
+echo ==========================================================>> "download_log.txt"
+echo Nova tentativa: %date% %time%>> "download_log.txt"
+echo Comando: spotdl download "%~1" --audio youtube youtube-music>> "download_log.txt"
+%PYCMD% -m spotdl download "%~1" --audio youtube youtube-music --format mp3 --threads 4 --max-retries 5 >> "download_log.txt" 2>&1
+exit /b %errorlevel%
+
+:REPAIR_YOUTUBE_TOOLS
+%PYCMD% -m pip install -U spotdl yt-dlp ytmusicapi brotli websockets mutagen
+if errorlevel 1 exit /b 1
+%PYCMD% -m spotdl --download-deno
 exit /b %errorlevel%
