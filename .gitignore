@@ -1,0 +1,12 @@
+# Configuracao local e erros da janela
+configuracoes.json
+erro_app.txt
+
+# Pastas de musicas geradas pelo aplicativo
+Musicas_Spotify*/
+Musicas_YouTube*/
+Musicas_Baixadas*/
+
+# Python
+__pycache__/
+*.pyc
