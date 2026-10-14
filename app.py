@@ -14,8 +14,10 @@ import queue
 import re
 import shutil
 import site
+import ssl
 import subprocess
 import sys
+import tempfile
 import threading
 import tkinter as tk
 import tkinter.font as tkfont
@@ -27,7 +29,15 @@ APP_NAME = "Baixador de Músicas"
 APP_DIR = Path(__file__).resolve().parent
 SETTINGS_FILE = APP_DIR / "configuracoes.json"
 SPOTDL_HOME = Path.home() / ".spotdl"
-TOOL_PACKAGES = ["spotdl", "yt-dlp", "ytmusicapi", "brotli", "websockets", "mutagen"]
+TOOL_PACKAGES = ["spotdl", "yt-dlp", "ytmusicapi", "brotli", "websockets", "mutagen", "truststore"]
+CA_BUNDLE = Path(tempfile.gettempdir()) / "baixador_musicas_certificados.pem"
+
+# Roda o spotDL validando HTTPS pelo Windows (truststore). Sem isso ele falha em
+# redes que inspecionam HTTPS, como firewalls de empresa (FortiGate etc.).
+SPOTDL_LAUNCHER = (
+    "import runpy, truststore; truststore.inject_into_ssl(); "
+    "runpy.run_module('spotdl', run_name='__main__', alter_sys=True)"
+)
 FOLDER_BASES = {
     "spotify": "Musicas_Spotify",
     "youtube": "Musicas_YouTube",
@@ -83,7 +93,22 @@ def find_tool(name):
 
 
 def missing_packages():
-    return [name for name in ("spotdl", "mutagen") if importlib.util.find_spec(name) is None]
+    return [name for name in ("spotdl", "mutagen", "truststore") if importlib.util.find_spec(name) is None]
+
+
+def windows_ca_bundle():
+    """certifi + certificados confiaveis do Windows, para o curl_cffi (que o truststore nao cobre)."""
+    import certifi
+
+    parts = [Path(certifi.where()).read_text(encoding="ascii")]
+    for store in ("ROOT", "CA"):
+        parts += [
+            ssl.DER_cert_to_PEM_cert(der)
+            for der, encoding, _trust in ssl.enum_certificates(store)
+            if encoding == "x509_asn"
+        ]
+    CA_BUNDLE.write_text("\n".join(parts), encoding="ascii")
+    return str(CA_BUNDLE)
 
 
 def create_folder(base_dir, name):
@@ -126,6 +151,7 @@ class Job:
         self.process = None
         self.cancelled = False
         self.ffmpeg = None
+        self.cert_env = {}
 
     # --- comunicacao com a janela ---
     def emit(self, kind, *data):
@@ -154,12 +180,12 @@ class Job:
             )
 
     # --- execucao de comandos ---
-    def run_command(self, args, cwd=None, log_file=None, on_line=None):
+    def run_command(self, args, cwd=None, log_file=None, on_line=None, env_extra=None, shown=None):
         self.check_cancel()
         env = os.environ.copy()
         # Saida em UTF-8, sem buffer e sem quebrar linhas longas do spotDL.
-        env.update(PYTHONUTF8="1", PYTHONUNBUFFERED="1", COLUMNS="200")
-        self.log("> " + " ".join(args[1:] if args[0] == self.python else args))
+        env.update(PYTHONUTF8="1", PYTHONUNBUFFERED="1", COLUMNS="200", **(env_extra or {}))
+        self.log("> " + " ".join(shown or args[1:]))
         self.process = subprocess.Popen(
             args,
             cwd=cwd,
@@ -198,6 +224,22 @@ class Job:
     def pip_install(self, packages):
         return self.run_command([self.python, "-m", "pip", "install", "-U", *packages])
 
+    def run_spotdl(self, *args, **kwargs):
+        return self.run_command(
+            [self.python, "-c", SPOTDL_LAUNCHER, *args],
+            env_extra=self.cert_env,
+            shown=["spotdl", *args],
+            **kwargs,
+        )
+
+    def trust_windows_certificates(self):
+        """Usa os mesmos certificados que o Windows confia (inclusive os de firewall de empresa)."""
+        import truststore
+
+        truststore.inject_into_ssl()  # buscas de capas/tags feitas por esta janela
+        bundle = windows_ca_bundle()
+        self.cert_env = {name: bundle for name in ("SSL_CERT_FILE", "REQUESTS_CA_BUNDLE", "CURL_CA_BUNDLE")}
+
     # --- ferramentas ---
     def ensure_tools(self):
         if missing_packages():
@@ -210,18 +252,19 @@ class Job:
             importlib.invalidate_caches()
             if missing_packages():
                 raise RuntimeError("O spotDL foi instalado, mas não pôde ser carregado. Feche e abra o app de novo.")
+        self.trust_windows_certificates()
 
         self.ffmpeg = find_tool("ffmpeg")
         if not self.ffmpeg:
             self.status("Baixando o FFmpeg (só na primeira vez)...")
-            self.run_command([self.python, "-m", "spotdl", "--download-ffmpeg"])
+            self.run_spotdl("--download-ffmpeg")
             self.ffmpeg = find_tool("ffmpeg")
             if not self.ffmpeg:
                 raise RuntimeError("O FFmpeg não foi encontrado nem pôde ser baixado.")
 
         if not find_tool("deno"):
             self.status("Baixando o Deno (só na primeira vez)...")
-            self.run_command([self.python, "-m", "spotdl", "--download-deno"])
+            self.run_spotdl("--download-deno")
             if not find_tool("deno"):
                 self.log("[AVISO] O Deno não pôde ser instalado. Algumas músicas do YouTube podem falhar.")
 
@@ -229,15 +272,16 @@ class Job:
         """Atualiza spotDL/yt-dlp: resolve a maioria dos erros do YouTube."""
         self.status("Atualizando spotDL e yt-dlp...")
         code = self.pip_install(TOOL_PACKAGES)
-        if not find_tool("deno"):
-            self.run_command([self.python, "-m", "spotdl", "--download-deno"])
+        if not find_tool("deno") and not missing_packages():
+            self.trust_windows_certificates()
+            self.run_spotdl("--download-deno")
         Job.repaired_this_session = code == 0
         return code
 
     # --- download ---
     def spotdl(self, url, folder, attempt):
         args = [
-            self.python, "-m", "spotdl", "download", url,
+            "download", url,
             "--audio", "youtube", "youtube-music",
             "--format", "mp3",
             "--threads", "4",
@@ -264,7 +308,7 @@ class Job:
             log_file.write("=" * 60 + "\n")
             log_file.write(f"{attempt}: {datetime.datetime.now():%d/%m/%Y %H:%M:%S}\n")
             log_file.write(f"Link: {url}\n")
-            code = self.run_command(args, cwd=folder, log_file=log_file, on_line=on_line)
+            code = self.run_spotdl(*args, cwd=folder, log_file=log_file, on_line=on_line)
             log_file.write(f"Resultado: código {code}, {result['errors']} erro(s)\n")
         result["code"] = code
         return result
