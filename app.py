@@ -7,13 +7,13 @@ tags. Abra pelo BaixarSpotify.bat ou com: pythonw app.py
 
 import codecs
 import datetime
-import importlib
 import importlib.util
 import json
 import os
 import queue
 import re
 import shutil
+import site
 import subprocess
 import sys
 import threading
@@ -39,7 +39,7 @@ LINK_HINTS = {
     "generico": "Link não reconhecido como Spotify ou YouTube. Vou tentar mesmo assim.",
 }
 
-NO_WINDOW = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+NO_WINDOW = subprocess.CREATE_NO_WINDOW
 ANSI_RE = re.compile(r"\x1b\[[0-9;?]*[A-Za-z]")
 PROGRESS_RE = re.compile(r"(\d+)/(\d+) complete")
 ERROR_RE = re.compile(r": Error\s*$|\b[A-Za-z]+(?:Error|Exception):")
@@ -72,7 +72,7 @@ def detect_link(url):
 
 
 def find_tool(name):
-    exe = name + (".exe" if os.name == "nt" else "")
+    exe = name + ".exe"
     candidates = [shutil.which(name), SPOTDL_HOME / exe]
     if name == "ffmpeg":
         candidates.append(Path(r"C:\ffmpeg\bin") / exe)
@@ -95,12 +95,6 @@ def create_folder(base_dir, name):
         folder = Path(base_dir) / f"{name}_{count}"
     folder.mkdir(parents=True)
     return folder
-
-
-def count_mp3(folder):
-    import metadata_fallback
-
-    return len(metadata_fallback.list_mp3(Path(folder)))
 
 
 def load_settings():
@@ -151,29 +145,20 @@ class Job:
         self.cancelled = True
         process = self.process
         if process and process.poll() is None:
-            if os.name == "nt":
-                # /T encerra tambem os filhos (ffmpeg, yt-dlp).
-                subprocess.run(
-                    ["taskkill", "/T", "/F", "/PID", str(process.pid)],
-                    stdout=subprocess.DEVNULL,
-                    stderr=subprocess.DEVNULL,
-                    creationflags=NO_WINDOW,
-                )
-            else:
-                process.kill()
+            # /T encerra tambem os filhos (ffmpeg, yt-dlp).
+            subprocess.run(
+                ["taskkill", "/T", "/F", "/PID", str(process.pid)],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                creationflags=NO_WINDOW,
+            )
 
     # --- execucao de comandos ---
     def run_command(self, args, cwd=None, log_file=None, on_line=None):
         self.check_cancel()
         env = os.environ.copy()
-        env.update(
-            PYTHONIOENCODING="utf-8",
-            PYTHONUTF8="1",
-            PYTHONUNBUFFERED="1",
-            NO_COLOR="1",
-            TERM="dumb",
-            COLUMNS="200",
-        )
+        # Saida em UTF-8, sem buffer e sem quebrar linhas longas do spotDL.
+        env.update(PYTHONUTF8="1", PYTHONUNBUFFERED="1", COLUMNS="200")
         self.log("> " + " ".join(args[1:] if args[0] == self.python else args))
         self.process = subprocess.Popen(
             args,
@@ -215,11 +200,13 @@ class Job:
 
     # --- ferramentas ---
     def ensure_tools(self):
-        missing = missing_packages()
-        if missing:
+        if missing_packages():
             self.status("Instalando spotDL e Mutagen (só na primeira vez)...")
             if self.pip_install(TOOL_PACKAGES) != 0:
                 raise RuntimeError("Não foi possível instalar o spotDL. Veja os detalhes abaixo.")
+            # O pip pode ter criado agora a pasta de pacotes do usuario, que o
+            # Python so poe no sys.path se ela ja existia quando o app abriu.
+            site.addsitedir(site.getusersitepackages())
             importlib.invalidate_caches()
             if missing_packages():
                 raise RuntimeError("O spotDL foi instalado, mas não pôde ser carregado. Feche e abra o app de novo.")
@@ -307,7 +294,7 @@ class Job:
         self.status("Conferindo capas e tags...")
         self.emit("busy")
         summary = metadata_fallback.run(folder, log=self.log, stop=lambda: self.cancelled)
-        if summary["code"] == 1:
+        if summary["set_aside"]:
             # Arquivos sem capa foram separados; baixa de novo e devolve o que nao vier.
             try:
                 self.status(f"Baixando de novo {summary['set_aside']} música(s) sem capa...")
@@ -324,7 +311,7 @@ class Job:
 
         return {
             "folder": str(folder),
-            "files": count_mp3(folder),
+            "files": len(metadata_fallback.list_mp3(folder)),
             "summary": summary,
             "errors": result["errors"],
             "blocked": result["blocked"],
@@ -368,7 +355,6 @@ class App(tk.Tk):
         self._build()
         self.protocol("WM_DELETE_WINDOW", self.on_close)
         self.after(100, self.poll_events)
-        self.after(300, self.check_environment)
 
     # --- aparencia ---
     def _setup_style(self):
@@ -524,17 +510,6 @@ class App(tk.Tk):
     def open_folder(self):
         if self.folder and Path(self.folder).exists():
             os.startfile(self.folder)
-
-    def check_environment(self):
-        problems = []
-        if missing_packages():
-            problems.append("spotDL")
-        if not find_tool("ffmpeg"):
-            problems.append("FFmpeg")
-        if problems:
-            self.set_status(
-                f"Faltando: {', '.join(problems)}. Será instalado no primeiro download.", "Warn"
-            )
 
     def set_busy(self, busy):
         state = "disabled" if busy else "normal"
@@ -696,8 +671,6 @@ class App(tk.Tk):
 
 def enable_dpi_awareness():
     """Evita texto borrado em telas com escala acima de 100% no Windows."""
-    if os.name != "nt":
-        return
     try:
         import ctypes
 
@@ -717,12 +690,6 @@ if __name__ == "__main__":
     except Exception:
         import traceback
 
-        details = traceback.format_exc()
-        (APP_DIR / "erro_app.txt").write_text(details, encoding="utf-8")
-        try:
-            root = tk.Tk()
-            root.withdraw()
-            messagebox.showerror(APP_NAME, "O aplicativo não conseguiu abrir.\n\n" + details[-1500:])
-        except Exception:
-            pass
+        # Aberto com pythonw nao ha terminal: mostra o erro numa caixa.
+        messagebox.showerror(APP_NAME, "O aplicativo não conseguiu abrir.\n\n" + traceback.format_exc()[-1500:])
         raise

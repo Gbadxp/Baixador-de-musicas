@@ -1,23 +1,13 @@
-"""Valida e completa os metadados (tags ID3 e capa) dos MP3 baixados.
-
-Usado pela janela (app.py), mas tambem funciona sozinho no terminal:
-
-    python metadata_fallback.py [pasta]          # 1a passada
-    python metadata_fallback.py [pasta] --final  # depois da nova tentativa
+"""Valida e completa os metadados (tags ID3 e capa) dos MP3 baixados pela janela (app.py).
 
 Na 1a passada, musicas que continuam sem capa sao movidas para a subpasta
 _sem_capa_aguardando, para que o spotDL as baixe de novo. Na passada final,
 nada e removido: se a musica nao foi baixada de novo, o arquivo antigo volta.
-
-Codigos de saida: 0 = tudo OK, 1 = musicas separadas para nova tentativa,
-2 = ainda ha musicas sem capa ou com tags incompletas.
 """
 
-import argparse
 import json
 import re
 import shutil
-import sys
 import time
 import unicodedata
 import urllib.error
@@ -512,8 +502,8 @@ def write_report(folder, summary, results):
                 fh.write(line + "\n")
 
 
-def run(folder=".", final=False, log=print, stop=lambda: False):
-    """Verifica todos os MP3 da pasta e devolve um resumo com o codigo de saida.
+def run(folder, final=False, log=print, stop=lambda: False):
+    """Verifica todos os MP3 da pasta e devolve um resumo com as contagens.
 
     stop() e consultado entre um arquivo e outro para permitir cancelar."""
     folder = Path(folder).resolve()
@@ -554,35 +544,5 @@ def run(folder=".", final=False, log=print, stop=lambda: False):
         "without_cover": sum(1 for item in results if not item["has_cover"] and not item["set_aside"]),
         "incomplete": sum(1 for item in results if item["missing_tags"]),
     }
-    if summary["set_aside"]:
-        summary["code"] = 1
-    elif summary["without_cover"] or summary["incomplete"]:
-        summary["code"] = 2
-    else:
-        summary["code"] = 0
-
     write_report(folder, summary, results)
     return summary
-
-
-def main():
-    parser = argparse.ArgumentParser(description="Valida e completa tags/capas dos MP3 baixados.")
-    parser.add_argument("pasta", nargs="?", default=".", help="pasta com os MP3 (padrão: pasta atual)")
-    parser.add_argument("--final", action="store_true", help="passada final: não separa nem remove nada")
-    args = parser.parse_args()
-
-    summary = run(args.pasta, final=args.final)
-    print(f"MP3 verificados: {summary['checked']}")
-    print(f"Tags preenchidas/ajustadas: {summary['fixed_tags']}")
-    print(f"Capas encontradas na internet: {summary['fixed_covers']}")
-    if summary["set_aside"]:
-        print(f"Sem capa, separados para nova tentativa: {summary['set_aside']}")
-    if summary["without_cover"]:
-        print(f"Sem capa (mantidos): {summary['without_cover']}")
-    if summary["incomplete"]:
-        print(f"Com tags incompletas: {summary['incomplete']}")
-    return summary["code"]
-
-
-if __name__ == "__main__":
-    sys.exit(main())
