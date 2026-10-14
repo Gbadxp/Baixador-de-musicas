@@ -52,8 +52,12 @@ LINK_HINTS = {
 NO_WINDOW = subprocess.CREATE_NO_WINDOW
 ANSI_RE = re.compile(r"\x1b\[[0-9;?]*[A-Za-z]")
 PROGRESS_RE = re.compile(r"(\d+)/(\d+) complete")
-ERROR_RE = re.compile(r": Error\s*$|\b[A-Za-z]+(?:Error|Exception):")
-BLOCKED_RE = re.compile(r"sign in to confirm|po token|not a bot|client token", re.I)
+# Lista final do --print-errors: "<link> - <TipoDoErro>: <mensagem>"
+FAILED_RE = re.compile(r"^(https?://\S+) - (\w+(?:Error|Exception)): (.*)$")
+# So a verificacao de robo e bloqueio de verdade (restricao de idade nao e).
+BLOCKED_RE = re.compile(r"not a bot|po token", re.I)
+FAILED_FILE = "musicas_que_falharam.txt"
+TEMPORARY_FAILURE = "Erro ao baixar do YouTube (pode dar certo tentando de novo mais tarde)"
 
 
 class Cancelled(Exception):
@@ -120,6 +124,25 @@ def create_folder(base_dir, name):
         folder = Path(base_dir) / f"{name}_{count}"
     folder.mkdir(parents=True)
     return folder
+
+
+def failure_reason(error, message):
+    if error == "LookupError":
+        return "Não encontradas no YouTube"
+    if "confirm your age" in message:
+        return "Com restrição de idade no YouTube (exigem login)"
+    return TEMPORARY_FAILURE
+
+
+def write_failures(folder, failed):
+    """Salva as musicas que falharam, agrupadas pelo motivo."""
+    groups = {}
+    for link, (reason, name) in failed.items():
+        groups.setdefault(reason, []).append(f"{name} - {link}" if name else link)
+    lines = [f"Músicas que não puderam ser baixadas: {len(failed)}", ""]
+    for reason, items in groups.items():
+        lines += [f"{reason} ({len(items)}):", *(f"  {item}" for item in sorted(items)), ""]
+    (Path(folder) / FAILED_FILE).write_text("\n".join(lines), encoding="utf-8")
 
 
 def load_settings():
@@ -222,7 +245,9 @@ class Job:
         return code
 
     def pip_install(self, packages):
-        return self.run_command([self.python, "-m", "pip", "install", "-U", *packages])
+        return self.run_command(
+            [self.python, "-m", "pip", "install", "-U", "-q", "--disable-pip-version-check", *packages]
+        )
 
     def run_spotdl(self, *args, **kwargs):
         return self.run_command(
@@ -292,14 +317,17 @@ class Job:
         if self.ffmpeg:
             args += ["--ffmpeg", self.ffmpeg]
 
-        result = {"errors": 0, "blocked": False}
+        result = {"failed": {}, "blocked": False}
 
         def on_line(line):
             match = PROGRESS_RE.search(line)
             if match:
                 self.emit("progress", int(match.group(1)), int(match.group(2)))
-            if ERROR_RE.search(line):
-                result["errors"] += 1
+            match = FAILED_RE.match(line)
+            if match:
+                link, error, message = match.groups()
+                name = message.split("for song:", 1)[1].strip() if "for song:" in message else ""
+                result["failed"][link] = (failure_reason(error, message), name)
             if BLOCKED_RE.search(line):
                 result["blocked"] = True
 
@@ -309,7 +337,7 @@ class Job:
             log_file.write(f"{attempt}: {datetime.datetime.now():%d/%m/%Y %H:%M:%S}\n")
             log_file.write(f"Link: {url}\n")
             code = self.run_spotdl(*args, cwd=folder, log_file=log_file, on_line=on_line)
-            log_file.write(f"Resultado: código {code}, {result['errors']} erro(s)\n")
+            log_file.write(f"Resultado: código {code}, {len(result['failed'])} música(s) com falha\n")
         result["code"] = code
         return result
 
@@ -326,7 +354,10 @@ class Job:
 
         self.status("Baixando músicas...")
         result = self.spotdl(url, folder, "Tentativa 1")
-        if result["code"] != 0 or result["errors"]:
+        temporary = [link for link, (reason, _name) in result["failed"].items() if reason == TEMPORARY_FAILURE]
+        # So repete falhas temporarias (ou se o spotDL parou sem listar erros);
+        # musica que nao existe no YouTube continuaria nao existindo.
+        if temporary or (result["code"] != 0 and not result["failed"]):
             if Job.repaired_this_session:
                 self.status("Algumas músicas falharam. Tentando de novo...")
             else:
@@ -334,6 +365,9 @@ class Job:
                 self.update_tools()
             # Musicas ja baixadas sao puladas pelo spotDL; so as que faltam sao refeitas.
             result = self.spotdl(url, folder, "Tentativa 2 (após reparo)")
+        if result["failed"]:
+            write_failures(folder, result["failed"])
+            self.log(f"Lista das músicas que falharam salva em {FAILED_FILE}.")
 
         self.status("Conferindo capas e tags...")
         self.emit("busy")
@@ -357,7 +391,7 @@ class Job:
             "folder": str(folder),
             "files": len(metadata_fallback.list_mp3(folder)),
             "summary": summary,
-            "errors": result["errors"],
+            "failed": len(result["failed"]),
             "blocked": result["blocked"],
         }
 
@@ -697,18 +731,21 @@ class App(tk.Tk):
             return
 
         notes = []
-        if result["errors"]:
-            notes.append("algumas músicas falharam")
+        if result["failed"]:
+            notes.append(f"{result['failed']} não puderam ser baixadas (veja {FAILED_FILE})")
+        tag_notes = []
         if summary["without_cover"]:
-            notes.append(f"{summary['without_cover']} sem capa")
+            tag_notes.append(f"{summary['without_cover']} sem capa")
         if summary["incomplete"]:
-            notes.append(f"{summary['incomplete']} com tags incompletas")
+            tag_notes.append(f"{summary['incomplete']} com tags incompletas")
+        if tag_notes:
+            notes.append(", ".join(tag_notes) + " (veja metadata_report.txt)")
         text = f"Concluído: {files} música(s) em {folder_name}."
         if notes:
-            text += " Atenção: " + ", ".join(notes) + " (veja metadata_report.txt)."
-            if result["blocked"]:
-                text += " O YouTube bloqueou parte dos downloads; tente mais tarde."
-        self.set_status(text, "Warn" if notes else "Ok")
+            text += " Atenção: " + "; ".join(notes) + "."
+        if result["blocked"]:
+            text += " O YouTube bloqueou parte dos downloads; tente mais tarde."
+        self.set_status(text, "Warn" if notes or result["blocked"] else "Ok")
         self.append_log("")
         self.append_log(text)
 
