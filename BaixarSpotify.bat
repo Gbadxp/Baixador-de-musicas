@@ -6,7 +6,7 @@ cd /d "%~dp0"
 :: So encontra o Python e abre a janela (app.py).
 :: spotDL, FFmpeg e Deno sao instalados pela propria janela no primeiro download.
 
-for %%F in (app.py metadata_fallback.py) do (
+for %%F in (app.py metadata_fallback.py apple_music.py) do (
     if not exist "%%F" (
         echo [ERRO] O arquivo %%F nao foi encontrado. Ele precisa ficar na mesma pasta deste .bat.
         pause

@@ -31,6 +31,7 @@ SETTINGS_FILE = APP_DIR / "configuracoes.json"
 SPOTDL_HOME = Path.home() / ".spotdl"
 TOOL_PACKAGES = ["spotdl", "yt-dlp", "ytmusicapi", "brotli", "websockets", "mutagen", "truststore"]
 CA_BUNDLE = Path(tempfile.gettempdir()) / "baixador_musicas_certificados.pem"
+APPLE_MUSIC_LIST = Path(tempfile.gettempdir()) / "baixador_musicas_apple_music.spotdl"
 
 # Roda o spotDL validando HTTPS pelo Windows (truststore). Sem isso ele falha em
 # redes que inspecionam HTTPS, como firewalls de empresa (FortiGate etc.).
@@ -40,13 +41,15 @@ SPOTDL_LAUNCHER = (
 )
 FOLDER_BASES = {
     "spotify": "Musicas_Spotify",
+    "apple": "Musicas_AppleMusic",
     "youtube": "Musicas_YouTube",
     "generico": "Musicas_Baixadas",
 }
 LINK_HINTS = {
     "spotify": "Spotify: metadados do Spotify, áudio buscado no YouTube.",
+    "apple": "Apple Music: metadados do Apple Music, áudio buscado no YouTube.",
     "youtube": "YouTube: os metadados dependem do que o spotDL identificar.",
-    "generico": "Link não reconhecido como Spotify ou YouTube. Vou tentar mesmo assim.",
+    "generico": "Link não reconhecido como Spotify, Apple Music ou YouTube. Vou tentar mesmo assim.",
 }
 
 NO_WINDOW = subprocess.CREATE_NO_WINDOW
@@ -80,6 +83,8 @@ def detect_link(url):
     lower = url.lower()
     if "open.spotify.com" in lower or lower.startswith("spotify:"):
         return "spotify"
+    if "music.apple.com" in lower:
+        return "apple"
     if "youtube.com" in lower or "youtu.be" in lower:
         return "youtube"
     return "generico"
@@ -304,11 +309,14 @@ class Job:
         return code
 
     # --- download ---
-    def spotdl(self, url, folder, attempt):
+    def spotdl(self, url, query, folder, attempt):
         args = [
-            "download", url,
+            "download", query,
             "--audio", "youtube", "youtube-music",
             "--format", "mp3",
+            # 320 kbps nao deixa o audio melhor que o do YouTube, mas evita perder
+            # mais qualidade ao converter (o padrao do spotDL e 128 kbps).
+            "--bitrate", "320k",
             "--threads", "4",
             "--max-retries", "5",
             "--simple-tui",
@@ -324,7 +332,8 @@ class Job:
             if match:
                 self.emit("progress", int(match.group(1)), int(match.group(2)))
             match = FAILED_RE.match(line)
-            if match:
+            # MetadataError: a musica foi baixada; o metadata_fallback completa as tags.
+            if match and match.group(2) != "MetadataError":
                 link, error, message = match.groups()
                 name = message.split("for song:", 1)[1].strip() if "for song:" in message else ""
                 result["failed"][link] = (failure_reason(error, message), name)
@@ -352,8 +361,21 @@ class Job:
         self.emit("folder", str(folder))
         self.log(f"Pasta criada: {folder}")
 
+        query = url
+        if kind == "apple":
+            # O spotDL nao le links do Apple Music: os metadados vao num arquivo .spotdl.
+            import apple_music
+
+            self.status("Lendo as músicas do Apple Music...")
+            name, songs, warnings = apple_music.read_link(url)
+            self.log(f"Apple Music: {name} ({len(songs)} música(s))")
+            for warning in warnings:
+                self.log(f"[AVISO] {warning}")
+            query = str(APPLE_MUSIC_LIST)
+            apple_music.write_spotdl_file(songs, name, url, query)
+
         self.status("Baixando músicas...")
-        result = self.spotdl(url, folder, "Tentativa 1")
+        result = self.spotdl(url, query, folder, "Tentativa 1")
         temporary = [link for link, (reason, _name) in result["failed"].items() if reason == TEMPORARY_FAILURE]
         # So repete falhas temporarias (ou se o spotDL parou sem listar erros);
         # musica que nao existe no YouTube continuaria nao existindo.
@@ -364,7 +386,7 @@ class Job:
                 self.status("Algumas músicas falharam. Atualizando yt-dlp e tentando de novo...")
                 self.update_tools()
             # Musicas ja baixadas sao puladas pelo spotDL; so as que faltam sao refeitas.
-            result = self.spotdl(url, folder, "Tentativa 2 (após reparo)")
+            result = self.spotdl(url, query, folder, "Tentativa 2 (após reparo)")
         if result["failed"]:
             write_failures(folder, result["failed"])
             self.log(f"Lista das músicas que falharam salva em {FAILED_FILE}.")
@@ -376,7 +398,7 @@ class Job:
             # Arquivos sem capa foram separados; baixa de novo e devolve o que nao vier.
             try:
                 self.status(f"Baixando de novo {summary['set_aside']} música(s) sem capa...")
-                self.spotdl(url, folder, "Nova tentativa (sem capa)")
+                self.spotdl(url, query, folder, "Nova tentativa (sem capa)")
             finally:
                 if self.cancelled:
                     metadata_fallback.restore_set_aside(Path(folder))
@@ -459,7 +481,7 @@ class App(tk.Tk):
         ttk.Label(main, text=APP_NAME, style="Title.TLabel").grid(row=0, column=0, sticky="w")
         intro = ttk.Label(
             main,
-            text="Cole o link de uma música, álbum ou playlist do Spotify ou do YouTube. "
+            text="Cole o link de uma música, álbum ou playlist do Spotify, Apple Music ou YouTube. "
             "As músicas são salvas em MP3 com capa e tags.",
             style="Muted.TLabel",
             wraplength=720,
